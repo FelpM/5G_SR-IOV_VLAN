@@ -231,6 +231,72 @@ sudo sysctl -w net.ipv4.ip_forward=1
 iptables -t nat -A POSTROUTING -s 10.45.0.0/16 ! -o ogstun -j MASQUERADE
 ```
 # Validação de funcionamento com UERANSIM
+Antes de realizar a conexão da da infraestrutura real, podemos realizar um teste de conectividade e funcionamento correto das funções de rede com o Ueransim. Pra isso uma nova máquina virtual será criada e uma interface virtualizada anteriomente será dedicada a esta. Aproveitando a imagem já disponível no servidor, a VM terá as seguintes especificações. 
+- Ubuntu Server 22.04 LTS
+- 4 gb de ram
+- 2 CPU
+- Disco LVM com 20 GB
+- 1 Interface bridge **br101**
+- 1 interface SR-IOV
+
+Todos os passos para a criação da máquina já foram abordados neste passo a passo e podem ser a reaplicados na criação desta máquina. A interface bridge irá servir para dar conectividade à máquina para atualizações e download de dependências e deverá ser desativada posteriormente.
+## Configuração de ambiente
+A interface SR-IOV, deverá ter as tags de VLAN para conversar com UPF (70) e AMF (60). Como não é possível definir dois rótulos de VLAN para a mesma SR-IOV, essas tags deverão ser específicadas dentro da VM criada depois de virtualizar a SR-IOV. A nível de harware, no servidor e antes de realizar o passthrough da SR-IOV, o seguinte comando pode ser rodado para garantir que a interface não está segmentada:
+```
+sudo ip link set int vf 0 vlan 0 spoof off trust on
+```
+Os valores 0 para vlan neste comando indica o modo trunk da SR-IOV e a flag trust habilitada como on permite a passagem de mais de um MAC address pela interface. Durante a instalação da máquina virtual não será necessário realizar nenhuma alteração. A interface br101 utilizada como bridge deverá receber ip com DHCP habilitado por default e a interface adicionada poderá ser mantida inativa por hora. 
+
+Como as interfaces não foram criadas no netpland durante instalação elas deve ser configuradas por meio do uitlitário **ip**. Os comandos seguintes devem ser executados na máquina virtual e servem para criar duas interfaces virtuais em cima da sr-iov dedicada à VM, levando em conta que a mesma recebeu o nome de eth0 e que a redes do AMF e UPF são respectivamente 10.7.60.0/24 e 10.7.70.0/ 24.
+```
+sudo apt install vlan
+
+sudo ip link add link eth0 name vlan60 type vlan id 60
+sudo ip link add link eth0 name vlan70 type vlan id 70
+
+sudo ip addr add 10.7.60.196/24 dev vlan60
+sudo ip addr add 10.7.70.196/24 dev vlan70
+
+sudo ip link set dev eth0 up
+```
+## Instalar e configurar Ueransim
+Diferente do Open5gs, para utilizar o UERANSIM, é necessário realizar o download em seu repositório e compilá-lo localmente. As dependencias necessárias para esta atividades podem ser instaladas através do comando.
+```
+apt install make g++ libsctp-dev lksctp-tools iproute2 cmake git
+```
+Em seguida pode-se realizar o clone do repositório on-line, acessar a pasta criada e compilar os microserviços.
+```
+git clone https://github.com/aligungr/UERANSIM
+cd UERANSIM
+make
+```
+O UERANSIM trabalha com referência a arquivos .yaml que devem ser alterados de acordo com a configuração de cada rede. Como na nossa infraestrutura, os serviços AMF e UPF estão em redes separadas, deveremos usar como referencia os dois IPs configurados anteriormente. Para isso o arquivo **config/open5gs-gnb.yaml**, deve ser alterado nos seguintes parâmetros:
+```
+linkkIp: 10.7.60.196
+ngapIp: 10.7.60.196
+gtpIp: 10.7.70.196
+
+
+amfConfigs:
+    - address: 10.7.60.186 
+```
+Além destes parâmetros, outros também podem ser alterados e devem ser feitos de forma que correspondam às informações já confgurada no core como a PLMN e o slice. Depois de salvo com as novas informações a simulação de gnodeb pode ser executada com o seguinte comando.
+```
+build/nr-gnb -c config/open5gs-gnb.yaml
+```
+Se tudo estiver corretamente configurado a menssagem exibida na tela será **NG Setup procedure is successful**. Com a gnb simulada e conectada ao core o próximo arquivo a ser manipulado é o **config/open5gs-ue.yaml**. Neste arquivo será necessário alterar informação de **PLMN** e **slice (ST)**, caso estejam diferentes das configurações do core. Além disso é necessário alterar o parâmetro **gnbSearchList**, com o valor do IP da rede do AMF definido nesta máquina. As demais informações já existentes podem ser utilizada para realizar um registro de UE na página de administração de usuários do core. Os valores adotados deste arquivo e incluídos no gerenciador são:
+- supi
+- key
+- opn
+
+O acesso ao webui deve ser realizado através de uma máquina que alcaça a rede 101. Com as configurações realizadas anteriormente ela estará acessvel via navegador web na url http://10.7.101.186:9999. Inserindo as informações de UE recuperadas no arquivo do UERANSIM e de volta a máquina recém instalada, basta rodar o comando.
+```
+build/nr-ue -c config/open5gs-ue.yaml
+```
+Se tudo correr bem a mensagem de sucesso será **Connection setup for PDU session [1]** com a informação do IP atribuiído a UE na rede 10.45.0.0/16. O roteamento para a internet ainda pode ser testado. Em um novo terminal, é possível ver que o UERANSIM criou uma nova interface chamada **uesimtun0** o seguinte comando usa a mesmma para verificar sua conectividade com o IP do do google (8.8.8.8).
+```
+ping -I uesimtun0 8.8.8.8
+```
 
 
 
